@@ -6,6 +6,14 @@
 # only and scripts/package refuses Intel on purpose, hence the separate
 # workflow.
 #
+# Speed: the whole target/ and the cargo registry are cached, so a release
+# starts from the previous one's tree instead of compiling gpui, ghostty and
+# QuickJS again (a cold run took over an hour, a warm one about ten minutes).
+# scripts/ci-sources keeps unchanged files fresh to Cargo, as release.yml
+# does. Everything builds in the release profile: the app is what ships, so a
+# separate debug tree (just build) and a debug test tree only cost time; the
+# tests run against the release build instead.
+#
 # Tags only, never a branch: it builds the release node itself, so the binary
 # is upstream's released source with only these workflow files added (a tag
 # can't trigger a workflow it doesn't contain). To build one, fetch upstream's
@@ -36,19 +44,22 @@ env:
   # README.md: the versions CI uses.
   RUST_TOOLCHAIN: 1.95.0
   ZIG_VERSION: 0.16.0
-  # `just test` runs the script tests too.
+  # The script tests (`just test`'s first half) run through Bun.
   BUN_VERSION: 1.4.4
   # The arm64 release targets macOS 11; Intel matches it rather than rustc's
   # older default floor, so both downloads ask for the same system.
   MACOSX_DEPLOYMENT_TARGET: "11.0"
+  # Incremental state only bloats the cache: a tag builds each commit once.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   intel:
     # An x64 runner: the README's build-from-source steps compile and run
     # natively, no cross-compiling.
     runs-on: macos-15-intel
-    # The README builds three times (debug, tests, release for the install).
-    timeout-minutes: 120
+    # One release build of the whole tree: a cold run is about 25 minutes, a
+    # run off the cache below about ten.
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -63,9 +74,8 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-      - name: Install just and Bun
+      - name: Install Bun
         run: |
-          command -v just >/dev/null || brew install just
           # Bun's tags carry the v (ci.yml passes it the same way).
           curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_VERSION"
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
@@ -73,17 +83,42 @@ jobs:
         run: |
           want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
-      # README.md, "Build from source".
-      - name: just build
-        run: just build
+      # The whole target/, like release.yml: the vendored crates (gpui-kit,
+      # taffy, ghostty) are the slow part, and a fresh checkout would
+      # otherwise rebuild them all.
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: intel-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            intel-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+            intel-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      # Cargo judges files by time and a checkout makes them all new; this
+      # gives the unchanged ones an old time so the cache is reused.
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      # README.md, "Build from source". `just install` is this script, run
+      # directly so no brew install of just is needed.
+      - name: just install
+        run: bash scripts/install-macos
       - name: just test
         # Not a gate: upstream's suite is flaky on these runners (a lifecycle
         # test panics on an unrelated thread) and ci.yml already gates releases
         # on the platforms it ships. A failure still shows on the run.
+        #
+        # `just test` in the release profile: the tree above is already built,
+        # so the Rust half only compiles the test harnesses (a debug tree would
+        # be a second copy of every dependency).
         continue-on-error: true
-        run: just test
-      - name: just install
-        run: just install
+        run: |
+          bun test scripts/files.test.ts scripts/picker.test.ts scripts/agents.test.ts scripts/spaces.test.ts
+          cargo test --release --locked
       # scripts/install-macos prepares the app for the machine it runs on: the
       # version is a placeholder, no licenses go in, and the PATH it writes is
       # this runner's. A download needs all three to fit every machine.
@@ -112,6 +147,16 @@ jobs:
           tar -xOf "$out" Herdr.app/Contents/Resources/LICENSE | cmp - LICENSE
           (cd dist && shasum -a 256 herdr-app-macos-x86_64.tar.gz > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
+      # Note the sources this tree came from, then keep it for the next tag.
+      # A rerun of the same tag hits the exact key and saves nothing.
+      - name: Note the sources the cache was built from
+        run: scripts/ci-sources record
+      - name: Save build cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: intel-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: herdr-app-macos-x86_64

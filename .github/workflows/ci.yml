@@ -32,6 +32,9 @@ env:
 
 jobs:
   platform-tests:
+    # Upstream only: this fork builds released tags on Intel Macs
+    # (macos-intel.yml) and nothing on branch pushes.
+    if: github.repository == 'herdrdev/herdr-app'
     strategy:
       fail-fast: false
       matrix:
@@ -137,7 +140,7 @@ jobs:
   # Keep the required check name stable while requiring every platform.
   test:
     needs: platform-tests
-    if: always()
+    if: always() && github.repository == 'herdrdev/herdr-app'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -3,8 +3,15 @@
 # Upstream ships macos-aarch64 only and scripts/package stops on Intel on
 # purpose ("build from source instead"), so this workflow builds
 # x86_64-apple-darwin itself and packs Herdr.app the way scripts/package packs
-# the arm64 one. Same trigger as upstream's release: push a `v<version>` tag
-# matching Cargo.toml, nothing else.
+# the arm64 one.
+#
+# Tags only, never a branch: it builds the release node itself, so the
+# binary is upstream's released source with only these workflow files added
+# (a tag can't trigger a workflow it doesn't contain). To build one, fetch
+# upstream's tags and push the one you want:
+#
+#   git fetch --tags https://github.com/herdrdev/herdr-app.git
+#   git push origin refs/tags/v0.1.12
 #
 # An Apple Silicon runner cross-compiles: macOS builds both of its
 # architectures from one SDK, and GitHub's Intel images are going away.
@@ -14,13 +21,11 @@
 # and so never replaces itself with an arm64 download. New Intel builds come
 # from this page.
 name: macos-intel
-run-name: macos intel ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
+run-name: macos intel ${{ format('release {0}', github.ref_name) }}
 
 on:
   push:
     tags: ["v*"]
-  # The same build without a tag, to check the workflow itself.
-  workflow_dispatch:
 
 permissions:
   contents: read

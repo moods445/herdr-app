@@ -1,0 +1,175 @@
+# Intel Mac builds of the app, from this fork.
+#
+# Upstream ships macos-aarch64 only and scripts/package stops on Intel on
+# purpose ("build from source instead"), so this workflow builds
+# x86_64-apple-darwin itself and packs Herdr.app the way scripts/package packs
+# the arm64 one. Same trigger as upstream's release: push a `v<version>` tag
+# matching Cargo.toml, nothing else.
+#
+# An Apple Silicon runner cross-compiles: macOS builds both of its
+# architectures from one SDK, and GitHub's Intel images are going away.
+#
+# The result is attached to the tag's GitHub release here, never uploaded to
+# releases.herdr.dev: the app reads that manifest, finds no macOS Intel build,
+# and so never replaces itself with an arm64 download. New Intel builds come
+# from this page.
+name: macos-intel
+run-name: macos intel ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
+
+on:
+  push:
+    tags: ["v*"]
+  # The same build without a tag, to check the workflow itself.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-intel-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  # In the build: ghostty-sys builds libghostty with Zig.
+  ZIG_VERSION: 0.16.0
+  TARGET: x86_64-apple-darwin
+  # The arm64 release targets macOS 11; Intel matches it rather than rustc's
+  # older default floor, so both downloads ask for the same system.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  intel:
+    runs-on: macos-15
+    # A cold build of the vendored crates (gpui, ghostty, quickjs) is the slow
+    # part; there is no cache to restore on a tag.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.TARGET }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Version matches the tag
+        if: github.ref_type == 'tag'
+        run: |
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
+      - name: Build
+        run: |
+          # Only release builds update themselves and install the CLI link.
+          HERDR_APP_RELEASE=1 cargo build --release --locked --target "$TARGET"
+      # scripts/package, minus its Intel refusal: same bundle, same names.
+      - name: Pack Herdr.app
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          work=$(mktemp -d)
+          app="$work/Herdr.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/$TARGET/release/herdr-app" "$app/Contents/MacOS/Herdr"
+          cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+          cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+              <key>CFBundleExecutable</key><string>Herdr</string>
+              <key>CFBundleIdentifier</key><string>dev.herdr.app</string>
+              <key>CFBundleName</key><string>Herdr</string>
+              <key>CFBundleDisplayName</key><string>Herdr</string>
+              <key>CFBundleIconFile</key><string>Herdr</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>$version</string>
+              <key>CFBundleVersion</key><string>$version</string>
+              <key>NSMicrophoneUsageDescription</key><string>Terminal programs running in Herdr can use the microphone, for example for voice input.</string>
+              <key>NSCameraUsageDescription</key><string>Terminal programs running in Herdr can use the camera.</string>
+              <key>NSAppleEventsUsageDescription</key><string>Terminal programs running in Herdr can use AppleScript to control other apps.</string>
+              <key>NSPrincipalClass</key><string>NSApplication</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>LSEnvironment</key><dict/></dict></plist>
+          PLIST
+          # Ad hoc: this fork has no Developer ID to sign with (see mac-sign).
+          scripts/mac-sign "$app"
+          codesign --verify --deep --strict "$app"
+
+          archs=$(lipo -archs "$app/Contents/MacOS/Herdr")
+          [ "$archs" = x86_64 ] || { echo "expected an Intel binary, got: $archs"; exit 1; }
+
+          mkdir -p dist
+          out="dist/herdr-app-macos-x86_64.tar.gz"
+          tar -czf "$out" -C "$work" Herdr.app
+          # The notices and license travel with the app, unchanged.
+          tar -xOf "$out" Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES | cmp - THIRD-PARTY-NOTICES
+          tar -xOf "$out" Herdr.app/Contents/Resources/LICENSE | cmp - LICENSE
+          (cd dist && shasum -a 256 herdr-app-macos-x86_64.tar.gz > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-app-macos-x86_64
+          path: |
+            dist/herdr-app-macos-x86_64.tar.gz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  # The tag's GitHub release. Upstream's own release workflow publishes to its
+  # download server; this one is the only place an Intel build exists.
+  release:
+    needs: intel
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: herdr-app-macos-x86_64
+          path: dist
+      - name: Attach to the tag's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          sum=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
+          notes="$RUNNER_TEMP/notes.md"
+          cat > "$notes" <<NOTES
+          Intel (x86_64) build of Herdr $version for macOS 11 and later, built from the same sources as upstream's Apple Silicon release. Unofficial fork build: not signed with a Developer ID and not notarized.
+
+          Install:
+
+          \`\`\`sh
+          mkdir -p ~/Applications
+          tar -xzf herdr-app-macos-x86_64.tar.gz -C ~/Applications
+          xattr -dr com.apple.quarantine ~/Applications/Herdr.app
+          open ~/Applications/Herdr.app
+          \`\`\`
+
+          The app needs a herdr-core, which does ship an Intel build:
+
+          \`\`\`sh
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          \`\`\`
+
+          SHA-256: \`$sum\`
+
+          Herdr looks for its own updates on releases.herdr.dev, which has no Intel Mac build, so it never replaces this copy: new versions appear on this page.
+          NOTES
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/herdr-app-macos-x86_64.tar.gz dist/SHA256SUMS.txt --clobber
+            gh release edit "$tag" --notes-file "$notes"
+          else
+            gh release create "$tag" dist/herdr-app-macos-x86_64.tar.gz dist/SHA256SUMS.txt \
+              --title "Herdr $version (Intel Mac)" --notes-file "$notes"
+          fi

@@ -148,33 +148,36 @@ jobs:
           version="${tag#v}"
           sum=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
           notes="$RUNNER_TEMP/notes.md"
+          # Tilde fences: backticks need escaping inside an expanding heredoc.
           cat > "$notes" <<NOTES
           Intel (x86_64) build of Herdr $version for macOS 11 and later, built from the same sources as upstream's Apple Silicon release. Unofficial fork build: not signed with a Developer ID and not notarized.
 
           Install:
 
-          \`\`\`sh
+          ~~~sh
           mkdir -p ~/Applications
           tar -xzf herdr-app-macos-x86_64.tar.gz -C ~/Applications
           xattr -dr com.apple.quarantine ~/Applications/Herdr.app
           open ~/Applications/Herdr.app
-          \`\`\`
+          ~~~
 
           The app needs a herdr-core, which does ship an Intel build:
 
-          \`\`\`sh
+          ~~~sh
           curl -fsSL https://releases.herdr.dev/core/install.sh | sh
-          \`\`\`
+          ~~~
 
-          SHA-256: \`$sum\`
+          SHA-256: $sum
 
           Herdr looks for its own updates on releases.herdr.dev, which has no Intel Mac build, so it never replaces this copy: new versions appear on this page.
           NOTES
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/herdr-app-macos-x86_64.tar.gz dist/SHA256SUMS.txt --clobber
-            gh release edit "$tag" --notes-file "$notes"
+          # -R: this job checks nothing out, so gh can't find a repository.
+          repo=(-R "$GITHUB_REPOSITORY")
+          if gh release view "$tag" "${repo[@]}" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/herdr-app-macos-x86_64.tar.gz dist/SHA256SUMS.txt --clobber "${repo[@]}"
+            gh release edit "$tag" --notes-file "$notes" "${repo[@]}"
           else
             gh release create "$tag" dist/herdr-app-macos-x86_64.tar.gz dist/SHA256SUMS.txt \
-              --title "Herdr $version (Intel Mac)" --notes-file "$notes"
+              --title "Herdr $version (Intel Mac)" --notes-file "$notes" "${repo[@]}"
           fi

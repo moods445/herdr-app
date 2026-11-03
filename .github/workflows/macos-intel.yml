@@ -66,7 +66,8 @@ jobs:
       - name: Install just and Bun
         run: |
           command -v just >/dev/null || brew install just
-          curl -fsSL https://bun.sh/install | bash -s "bun-$BUN_VERSION"
+          # Bun's tags carry the v (ci.yml passes it the same way).
+          curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_VERSION"
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
       - name: Version matches the tag
         run: |
